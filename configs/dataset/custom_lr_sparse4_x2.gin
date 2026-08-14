@@ -1,0 +1,41 @@
+# Auto-written by reexport_splatformer_by_setting.py
+# SplatFormer eval root: test-set/customOOD_sparse4_x2
+
+SplatfactoDataset.remove_outlier_ndevs=-1
+SplatfactoDataset.image_per_scene = None
+SplatfactoDataset.sample_ratio_test = None
+SplatfactoDataset.max_gs_num = 100000
+SplatfactoDataset.load_pose_src = 'nerfstudio'
+SplatfactoDataset.background_color = [255, 255, 255]
+SplatfactoDataset.max_test_images = 8
+SplatfactoDataset.test_sample_seed = 42
+
+collate_fn = @GS_collate_fn
+build_trainloader.batch_size = 1
+build_trainloader.accumulate_step = 1
+build_trainloader.num_workers = 4
+build_trainloader.collate_fn = %collate_fn
+train_dataset/SplatfactoDataset.train_or_test = 'train'
+train_dataset/SplatfactoDataset.nerfstudio_folder = 'test-set/customOOD_sparse4_x2/nerfstudio'
+train_dataset/SplatfactoDataset.colmap_folder = 'test-set/customOOD_sparse4_x2/colmap'
+train_dataset/SplatfactoDataset.image_per_scene = 4
+train_dataset/SplatfactoDataset.sample_ratio_test = 0.7
+train_dataset/SplatfactoDataset.cache_steps = 1
+train_dataset/SplatfactoDataset.cache_num_scenes = 1
+train_dataset/SplatfactoDataset.split_across_gpus = True
+
+build_testloader.batch_size = 1
+build_testloader.num_workers = 0
+build_testloader.collate_fn = %collate_fn
+test_dataset/SplatfactoDataset.train_or_test = 'test'
+test_dataset/SplatfactoDataset.nerfstudio_folder = {
+  'custom_lr':'test-set/customOOD_sparse4_x2/nerfstudio',
+}
+test_dataset/SplatfactoDataset.colmap_folder = {
+   'custom_lr':'test-set/customOOD_sparse4_x2/colmap',
+}
+test_dataset/SplatfactoDataset.cache_steps = 1
+test_dataset/SplatfactoDataset.cache_num_scenes = 1
+test_dataset/SplatfactoDataset.split_across_gpus = False
+test_dataset/SplatfactoDataset.max_test_images = 8
+test_dataset/SplatfactoDataset.test_sample_seed = 42

@@ -351,8 +351,9 @@ def main(argv):
     gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
     os.makedirs(FLAGS.output_dir, exist_ok=True)
     set_seed()
-    # 1. Dataloading
-    train_loader = build_trainloader()
+    # 1. Dataloading (skip train loader for eval-only)
+    if not FLAGS.only_eval:
+      train_loader = build_trainloader()
     # 2. Build Model
     model = FeaturePredictor()
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -28,10 +28,15 @@ class SplatfactoDataset(torch.utils.data.IterableDataset):
                  cache_num_scenes: int, #Default: cache_num_scenes=1, cache_steps=1
                  split_across_gpus: bool,
                  background_color: list=[0,0,0],
+                 max_test_images: Optional[int] = None,
+                 test_sample_seed: int = 42,
                  ):
         self.train_or_test = train_or_test
         self.image_per_scene = image_per_scene
         self.sample_ratio_test = sample_ratio_test  
+        # Cap / randomly subsample test views (e.g. 8 to match Stage-2 eval).
+        self.max_test_images = max_test_images
+        self.test_sample_seed = test_sample_seed
 
         self.nerfstudio_folders = sorted([os.path.join(nerfstudio_folder, ls, 'splatfacto') for ls in os.listdir(nerfstudio_folder)])
         
@@ -154,9 +159,15 @@ class SplatfactoDataset(torch.utils.data.IterableDataset):
             print(f'Warning: {nerfstudio_dir} does not have nerfstudio_models/step-*.ckpt')
             exit()
         ckpt = torch.load(ckpt_file, map_location='cpu')
-        ckpt = {k.replace('_model.gauss_params.',''):v for k,v in ckpt.items() if 'gauss_params' in k}
-        gs_params = {k:ckpt[k] for k in set(skip_params)}
-        
+        parsed = gs_utils.extract_gauss_params_from_nerfstudio_ckpt(ckpt)
+        missing = [k for k in set(skip_params) if k not in parsed]
+        if missing:
+            raise KeyError(
+                f"Missing gauss_params {missing} in {ckpt_file}. "
+                f"Found keys: {sorted(parsed.keys())}"
+            )
+        gs_params = {k: parsed[k] for k in set(skip_params)}
+
         # Remove inf or nan
         select = torch.ones(gs_params['means'].shape[0], dtype=torch.bool)
         for key in gs_params:
@@ -201,8 +212,21 @@ class SplatfactoDataset(torch.utils.data.IterableDataset):
         with open(nerfstudio_dir + '/camera_for-3d-denoise.pkl', 'rb') as f:
             meta = pickle.load(f)
         train_imgs_path, test_imgs_path = [], []
+        images_dir = os.path.join(colmap_dir, 'images')
 
-        image_names = os.listdir(colmap_dir + '/images')
+        # Prefer explicit filenames written by train_lr_splats_splatfacto.export_splatformer_scene
+        if 'train_image_names' in meta and 'test_image_names' in meta:
+            train_imgs_path = [os.path.join(images_dir, n) for n in meta['train_image_names']]
+            test_imgs_path = [os.path.join(images_dir, n) for n in meta['test_image_names']]
+            missing = [p for p in train_imgs_path + test_imgs_path if not os.path.isfile(p)]
+            if missing:
+                raise FileNotFoundError(
+                    f"camera_for-3d-denoise.pkl lists images that are missing under {images_dir}. "
+                    f"Example: {os.path.basename(missing[0])}. Re-export with --overwrite."
+                )
+            return meta, train_imgs_path, test_imgs_path
+
+        image_names = [n for n in os.listdir(images_dir) if not n.startswith('.')]
         # Hard coded, only used for real-world dataset
         if os.path.isfile(os.path.join(colmap_dir,'ood-test_split.txt')):
             ood_test_img_names = []
@@ -219,12 +243,13 @@ class SplatfactoDataset(torch.utils.data.IterableDataset):
                 # We only use elevation-70/80/90
                 TESTSET_ELEVATION = True
                 if 'elevation90' in name or 'elevation80' in name or 'elevation70' in name:
-                    test_imgs_path.append(os.path.join(colmap_dir, 'images', name))
+                    test_imgs_path.append(os.path.join(images_dir, name))
             else:
-                if name.startswith('test') or name.startswith('frame_eval'):
-                    test_imgs_path.append(os.path.join(colmap_dir, 'images', name))
+                lower = name.lower()
+                if lower.startswith('test') or lower.startswith('frame_eval'):
+                    test_imgs_path.append(os.path.join(images_dir, name))
                 else:
-                    train_imgs_path.append(os.path.join(colmap_dir, 'images', name))
+                    train_imgs_path.append(os.path.join(images_dir, name))
         # Check: align the order of camer poses with the images 
         # print(test_imgs_path)
         # print(train_imgs_path)
@@ -235,6 +260,26 @@ class SplatfactoDataset(torch.utils.data.IterableDataset):
             # selected test_imgs_path and test_camera_to_worlds
             test_imgs_path = [test_imgs_path[i] for i in ood_ids]
             meta['test_camera_to_worlds'] = meta['test_camera_to_worlds'][ood_ids]
+
+        # Truncate to matching counts (stale/partial exports can disagree).
+        n_train = min(len(train_imgs_path), len(meta['train_camera_to_worlds']))
+        n_test = min(len(test_imgs_path), len(meta['test_camera_to_worlds']))
+        if len(train_imgs_path) != len(meta['train_camera_to_worlds']) or len(test_imgs_path) != len(meta['test_camera_to_worlds']):
+            print(
+                f"Warning: image/camera mismatch in {colmap_dir}: "
+                f"train imgs/cams={len(train_imgs_path)}/{len(meta['train_camera_to_worlds'])}, "
+                f"test imgs/cams={len(test_imgs_path)}/{len(meta['test_camera_to_worlds'])}. "
+                f"Using train={n_train}, test={n_test}. Re-export with --overwrite if this is unexpected."
+            )
+        train_imgs_path = train_imgs_path[:n_train]
+        test_imgs_path = test_imgs_path[:n_test]
+        meta['train_camera_to_worlds'] = meta['train_camera_to_worlds'][:n_train]
+        meta['test_camera_to_worlds'] = meta['test_camera_to_worlds'][:n_test]
+        if n_test == 0:
+            raise RuntimeError(
+                f"No test images found under {images_dir} (expected test_XXX.png). "
+                f"Re-export the scene with: python train_lr_splats_splatfacto.py ... --overwrite"
+            )
         return meta, train_imgs_path, test_imgs_path
 
     def load_images_cameras_fromcolmap(self, colmap_dir):
@@ -377,7 +422,18 @@ class SplatfactoDataset(torch.utils.data.IterableDataset):
             elif self.train_or_test == 'test':
                 assert self.background_color!='random', 'For test set, background_color cannot be random'
                 background = torch.tensor(self.background_color)/255.
-                test_cam_ids = np.arange(total_test_num) #We take all the test images
+                if (
+                    self.max_test_images is not None
+                    and self.max_test_images > 0
+                    and total_test_num > self.max_test_images
+                ):
+                    # Deterministic random subsample (matches Stage-2 8-view protocol).
+                    rng = np.random.default_rng(self.test_sample_seed + int(scene['idx']))
+                    test_cam_ids = np.sort(
+                        rng.choice(total_test_num, size=self.max_test_images, replace=False)
+                    )
+                else:
+                    test_cam_ids = np.arange(total_test_num)  # all test images
                 images = [self.read_image(test_imgs_path[i], background=background) for i in test_cam_ids]
                 images_names = [test_imgs_name[i] for i in test_cam_ids]
                 cameras['camera_to_worlds'] = meta['test_camera_to_worlds'][test_cam_ids] 

@@ -17,6 +17,61 @@ def SH2RGB(sh):
 def RGB2SH(rgb):
     return (rgb - 0.5) / C0
 
+
+_GAUSS_PARAM_NAMES = ("means", "scales", "quats", "features_dc", "features_rest", "opacities")
+
+
+def extract_gauss_params_from_nerfstudio_ckpt(ckpt_obj):
+    """Pull gaussian tensors from a splatfacto / nerfstudio checkpoint.
+
+    Supports several on-disk layouts:
+      - flat SplatFormer pack: '_model.gauss_params.means'
+      - Lightning 'state_dict' wrapping
+      - nerfstudio Trainer: ckpt['pipeline']['_model.gauss_params.means']
+      - older splatfacto: ckpt['pipeline']['_model.means']
+    """
+    if not isinstance(ckpt_obj, dict):
+        raise TypeError(f"Expected dict checkpoint, got {type(ckpt_obj)}")
+
+    candidates = [ckpt_obj]
+    for nest_key in ("state_dict", "pipeline"):
+        nested = ckpt_obj.get(nest_key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+            nested_sd = nested.get("state_dict")
+            if isinstance(nested_sd, dict):
+                candidates.append(nested_sd)
+
+    # Prefer ParameterDict-style keys (gauss_params.*) over legacy _model.<name>.
+    parsed_gp, parsed_legacy = {}, {}
+    for state in candidates:
+        for k, v in state.items():
+            if not torch.is_tensor(v):
+                continue
+            if "gauss_params." in k:
+                name = k.split("gauss_params.")[-1]
+                if name in _GAUSS_PARAM_NAMES:
+                    parsed_gp[name] = v
+                continue
+            # Legacy: '_model.means' / 'pipeline._model.means'
+            short = k.rsplit(".", 1)[-1]
+            if short in _GAUSS_PARAM_NAMES and (
+                k == short or k.endswith(f"_model.{short}")
+            ):
+                parsed_legacy[short] = v
+
+    parsed = parsed_gp if "means" in parsed_gp else parsed_legacy
+    if "means" not in parsed:
+        # Helpful debug: show a sample of tensor key names across candidates.
+        sample = []
+        for state in candidates:
+            sample.extend([k for k, v in state.items() if torch.is_tensor(v)][:12])
+        raise KeyError(
+            "Could not find gaussian params in checkpoint. "
+            f"Sample tensor keys: {sample[:24]}"
+        )
+    return parsed
+
 def rasterize_gaussians_to_multiimgs(gs_params, cameras):
     camera_to_worlds = cameras['camera_to_worlds']
     rgbs, alphas = [], []
@@ -78,38 +133,77 @@ def rasterize_gaussians_to_singleimg(gs_params, camera_to_world, cx, cy, fx, fy,
         rgbs = gsplat.spherical_harmonics(n, viewdirs, colors)
         rgbs = torch.clamp(rgbs + 0.5, min=0.0)  # type: ignore
     H, W = int(height.item()), int(width.item())
-   
-    xys, depths, radii, conics, comp, num_tiles_hit, cov3d = gsplat.project_gaussians(  # type: ignore
-        means,
-        scales,
-        1,
-        quats,
-        viewmat.squeeze()[:3, :].float(),
-        fx.item(),
-        fy.item(),
-        cx.item(),
-        cy.item(),
-        H,
-        W,
-        BLOCK_WIDTH,
-    ) 
-    rgb, alpha = gsplat.rasterize_gaussians(  
-        xys,
-        depths,
-        radii,
-        conics,
-        num_tiles_hit,  
-        rgbs,
-        opacities,
-        H,
-        W,
-        BLOCK_WIDTH,
-        background = background_color,
-        return_alpha=True,
-    )  
+    fx_f, fy_f = float(fx.item()), float(fy.item())
+    cx_f, cy_f = float(cx.item()), float(cy.item())
+    bg = background_color
+    if not torch.is_tensor(bg):
+        bg = torch.tensor(bg, device=means.device, dtype=means.dtype)
+    else:
+        bg = bg.to(device=means.device, dtype=means.dtype)
 
-    rgb = torch.clamp(rgb, max=1.0)  
-    alpha = alpha.unsqueeze(-1)
+    # gsplat v0.1.x: project_gaussians + rasterize_gaussians
+    # gsplat v1+: rasterization(...)
+    if hasattr(gsplat, "project_gaussians") and hasattr(gsplat, "rasterize_gaussians"):
+        xys, depths, radii, conics, comp, num_tiles_hit, cov3d = gsplat.project_gaussians(  # type: ignore
+            means,
+            scales,
+            1,
+            quats,
+            viewmat.squeeze()[:3, :].float(),
+            fx_f,
+            fy_f,
+            cx_f,
+            cy_f,
+            H,
+            W,
+            BLOCK_WIDTH,
+        )
+        rgb, alpha = gsplat.rasterize_gaussians(
+            xys,
+            depths,
+            radii,
+            conics,
+            num_tiles_hit,
+            rgbs,
+            opacities,
+            H,
+            W,
+            BLOCK_WIDTH,
+            background=bg,
+            return_alpha=True,
+        )
+    elif hasattr(gsplat, "rasterization"):
+        opa = opacities.reshape(-1)
+        K = torch.tensor(
+            [[fx_f, 0.0, cx_f], [0.0, fy_f, cy_f], [0.0, 0.0, 1.0]],
+            device=means.device,
+            dtype=means.dtype,
+        ).unsqueeze(0)
+        rgb, alpha, _info = gsplat.rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opa,
+            colors=rgbs,
+            viewmats=viewmat.unsqueeze(0),
+            Ks=K,
+            width=W,
+            height=H,
+            render_mode="RGB",
+            packed=True,
+        )
+        # Composite background manually (packed backgrounds shape differs across gsplat versions).
+        rgb = rgb[0] + (1.0 - alpha[0]) * bg
+        alpha = alpha[0]
+    else:
+        raise ImportError(
+            "Unsupported gsplat install: need project_gaussians/rasterize_gaussians (v0.1.x) "
+            "or rasterization (v1+)."
+        )
+
+    rgb = torch.clamp(rgb, max=1.0)
+    if alpha.ndim == 2:
+        alpha = alpha.unsqueeze(-1)
 
     return rgb, alpha
 
