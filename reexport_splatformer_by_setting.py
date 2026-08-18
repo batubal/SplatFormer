@@ -41,6 +41,9 @@ from lr_experiment_settings import (
     filter_experiments,
     scratch_dir,
 )
+from lr_splat_helpers import patch_numpy_pickle_aliases
+
+patch_numpy_pickle_aliases()
 from train_lr_splats_splatfacto import (
     _find_latest_ckpt,
     _find_latest_config,

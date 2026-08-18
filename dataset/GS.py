@@ -3,6 +3,7 @@ import gin
 import numpy as np 
 from typing import Optional, Union
 import pickle
+import sys
 import cv2, os
 from utils.transform_utils import remove_outliers, MinMaxScaler
 from dataset import colmap_utils
@@ -12,6 +13,13 @@ from pathlib import Path
 import random
 from PIL import Image
 from time import time
+
+try:
+    import numpy._core  # noqa: F401
+except ImportError:
+    import numpy.core as _np_core  # type: ignore
+
+    sys.modules.setdefault("numpy._core", _np_core)
 
 @gin.configurable
 class SplatfactoDataset(torch.utils.data.IterableDataset):
