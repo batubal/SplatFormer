@@ -691,7 +691,7 @@ class SplatfactoShapeNetConfig:
     max_num_iterations: int = 20_000
     cull_alpha_thresh: float = 0.15
     background_color: str = "white"
-    vis: str = "tensorboard"
+    vis: str = "none"  # tensorboard/viewer stalls ns-train on TRUBA GPU nodes
 
     # SplatFormer export
     splatformer_root: str = "test-set/customOOD"
@@ -1306,6 +1306,14 @@ def process_sample(
             cfg.vis,
             "--max-num-iterations",
             str(cfg.max_num_iterations),
+            # Skip in-training eval; it freezes the progress table (~15%) and
+            # makes ETA jump to many hours. Final quality is from ns-eval / SplatFormer.
+            "--steps-per-eval-image",
+            "100000",
+            "--steps-per-eval-batch",
+            "100000",
+            "--steps-per-eval-all-images",
+            "100000",
             "--pipeline.model.sh-degree",
             str(cfg.sh_degree),
             "--pipeline.model.cull-alpha-thresh",
@@ -1485,7 +1493,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_num_iterations", type=int, default=20_000)
     parser.add_argument("--cull_alpha_thresh", type=float, default=0.15)
     parser.add_argument("--background_color", type=str, default="white", choices=["white", "black", "random"])
-    parser.add_argument("--vis", type=str, default="tensorboard", choices=["tensorboard", "wandb", "viewer", "none"])
+    parser.add_argument("--vis", type=str, default="none", choices=["tensorboard", "wandb", "viewer", "none"])
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
