@@ -691,7 +691,7 @@ class SplatfactoShapeNetConfig:
     max_num_iterations: int = 20_000
     cull_alpha_thresh: float = 0.15
     background_color: str = "white"
-    vis: str = "none"  # tensorboard/viewer stalls ns-train on TRUBA GPU nodes
+    vis: str = "none"  # sentinel → tensorboard; viewer stalls ns-train on TRUBA GPU nodes
 
     # SplatFormer export
     splatformer_root: str = "test-set/customOOD"
@@ -1126,6 +1126,17 @@ def _format_metrics_record(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_ns_vis(vis: str | None) -> str:
+    """Map our ``none`` sentinel to a valid ns-train ``--vis`` choice.
+
+    nerfstudio's ns-train has no ``none`` option (choices: viewer, wandb,
+    tensorboard, comet, ...). Use ``tensorboard`` (file logging only, no
+    viewer/websocket server) to disable interactive vis without the viewer
+    stall seen on TRUBA GPU nodes.
+    """
+    return "tensorboard" if vis in (None, "", "none") else vis
+
+
 def process_sample(
     hr_ply: str,
     work_dir: str,
@@ -1303,7 +1314,7 @@ def process_sample(
             "--experiment-name",
             sample_stem,
             "--vis",
-            cfg.vis,
+            _resolve_ns_vis(cfg.vis),
             "--max-num-iterations",
             str(cfg.max_num_iterations),
             # Skip in-training eval; it freezes the progress table (~15%) and
