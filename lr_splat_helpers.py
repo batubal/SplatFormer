@@ -6,57 +6,10 @@ import json
 import math
 import os
 import random
-import sys
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 import numpy as np
-
-
-def patch_numpy_pickle_aliases() -> None:
-    """Allow pickle/torch.load to read arrays saved under a different NumPy major.
-
-    NumPy 2 renamed ``numpy.core`` → ``numpy._core``. Loading a NumPy-2 pickle
-    on NumPy 1 raises ``ModuleNotFoundError: No module named 'numpy._core'``.
-    No-op on a working NumPy 2 install.
-    """
-    try:
-        import numpy._core  # noqa: F401
-
-        return
-    except ImportError:
-        pass
-
-    import numpy.core as np_core  # type: ignore
-
-    sys.modules.setdefault("numpy._core", np_core)
-    for sub in (
-        "multiarray",
-        "numeric",
-        "umath",
-        "_multiarray_umath",
-        "numerictypes",
-        "overrides",
-        "_dtype_ctypes",
-        "_internal",
-        "fromnumeric",
-        "shape_base",
-        "function_base",
-        "multiarray_umath",
-    ):
-        alias = f"numpy._core.{sub}"
-        if alias in sys.modules:
-            continue
-        legacy = f"numpy.core.{sub}"
-        try:
-            sys.modules[alias] = __import__(legacy, fromlist=["*"])
-        except ImportError:
-            if hasattr(np_core, sub):
-                sys.modules[alias] = getattr(np_core, sub)
-
-
-patch_numpy_pickle_aliases()
-
 import torch
 import torch.nn.functional as F
 from plyfile import PlyData
@@ -851,10 +804,53 @@ def resolve_split_metadata_path(cache_path: str) -> str:
     )
 
 
+def _patch_numpy_pickle_aliases() -> None:
+    """Allow torch/pickle to load meta saved under a different NumPy major version.
+
+    NumPy 2 renamed ``numpy.core`` → ``numpy._core``. A meta.pt pickled with
+    NumPy 2 fails on NumPy 1 with ``No module named 'numpy._core.numeric'``.
+    Only add aliases when the target module is missing — never override a live
+    NumPy 2 install.
+    """
+    import sys
+
+    # NumPy 2+ already exposes numpy._core; nothing to patch for that failure mode.
+    try:
+        import numpy._core  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
+    # NumPy 1.x: alias numpy._core.* → numpy.core.* for NumPy-2 pickles.
+    import numpy.core as np_core  # type: ignore
+
+    sys.modules.setdefault("numpy._core", np_core)
+    for sub in (
+        "multiarray",
+        "numeric",
+        "umath",
+        "_multiarray_umath",
+        "numerictypes",
+        "overrides",
+        "_dtype_ctypes",
+        "_internal",
+    ):
+        alias = f"numpy._core.{sub}"
+        if alias in sys.modules:
+            continue
+        legacy = f"numpy.core.{sub}"
+        try:
+            sys.modules[alias] = __import__(legacy, fromlist=["*"])
+        except ImportError:
+            if hasattr(np_core, sub):
+                sys.modules[alias] = getattr(np_core, sub)
+
+
 def load_split_metadata(cache_path: str) -> dict[str, Any]:
     """Load gaussian_sr split metadata, tolerating NumPy 1↔2 pickle module renames."""
     meta_path = resolve_split_metadata_path(cache_path)
-    patch_numpy_pickle_aliases()
+    _patch_numpy_pickle_aliases()
     try:
         meta = torch.load(meta_path, map_location="cpu", weights_only=False)
     except ModuleNotFoundError as exc:
