@@ -692,6 +692,12 @@ class SplatfactoShapeNetConfig:
     cull_alpha_thresh: float = 0.15
     background_color: str = "white"
     vis: str = "none"  # sentinel → tensorboard; viewer stalls ns-train on TRUBA GPU nodes
+    # splatfacto default is 2 (coarse-to-fine). That is for 1k+ photos; at 100px LR
+    # it trains the first 3k steps at 25px and screen-size splitting explodes.
+    # 0 → train at camera-res-scale-factor resolution from step 0.
+    num_downscales: int = 0
+    # None → scale splatfacto's 0.05 so a Gaussian covers the same *pixels* as at 200px.
+    split_screen_size: float | None = None
 
     # SplatFormer export
     splatformer_root: str = "test-set/customOOD"
@@ -706,6 +712,14 @@ class SplatfactoShapeNetConfig:
     @property
     def camera_res_scale_factor(self) -> float:
         return self.lr_image_size / float(self.hr_image_size)
+
+    @property
+    def effective_split_screen_size(self) -> float:
+        if self.split_screen_size is not None:
+            return float(self.split_screen_size)
+        # splatfacto default 0.05 is a *fraction* of the image. At 100px that is
+        # 5px vs 10px at the working 200px (2×) setting, so 4× over-splits.
+        return 0.05 * (200.0 / float(self.lr_image_size))
 
     @property
     def train_all_views(self) -> bool:
@@ -1305,7 +1319,9 @@ def process_sample(
         print(
             f"=== ns-train splatfacto "
             f"(train_views={cfg.effective_num_train_views}/{cfg.num_views}, "
-            f"scale={cfg.camera_res_scale_factor}) ==="
+            f"scale={cfg.camera_res_scale_factor}, "
+            f"num_downscales={cfg.num_downscales}, "
+            f"split_screen_size={cfg.effective_split_screen_size:.4f}) ==="
         )
         train_cmd = _find_ns_cmd("ns-train") + [
             "splatfacto",
@@ -1331,6 +1347,10 @@ def process_sample(
             str(cfg.cull_alpha_thresh),
             "--pipeline.model.background-color",
             cfg.background_color,
+            "--pipeline.model.num-downscales",
+            str(cfg.num_downscales),
+            "--pipeline.model.split-screen-size",
+            str(cfg.effective_split_screen_size),
             "--pipeline.datamanager.camera-res-scale-factor",
             str(cfg.camera_res_scale_factor),
             "blender-data",
@@ -1503,6 +1523,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sh_degree", type=int, default=0)
     parser.add_argument("--max_num_iterations", type=int, default=20_000)
     parser.add_argument("--cull_alpha_thresh", type=float, default=0.15)
+    parser.add_argument(
+        "--num_downscales",
+        type=int,
+        default=0,
+        help=(
+            "splatfacto coarse-to-fine extra downscales. Default 0: train at "
+            "camera-res-scale-factor from step 0. splatfacto's own default (2) "
+            "makes 100px 4× start at 25px and explode Gaussian count."
+        ),
+    )
+    parser.add_argument(
+        "--split_screen_size",
+        type=float,
+        default=None,
+        help=(
+            "splatfacto screen-size split threshold (image fraction). "
+            "Default: 0.05 scaled to 200px so 4× uses 0.10 instead of 0.05."
+        ),
+    )
     parser.add_argument("--background_color", type=str, default="white", choices=["white", "black", "random"])
     parser.add_argument("--vis", type=str, default="none", choices=["tensorboard", "wandb", "viewer", "none"])
     parser.add_argument("--seed", type=int, default=42)
@@ -1599,6 +1638,8 @@ def _build_splatfacto_config(args: argparse.Namespace) -> SplatfactoShapeNetConf
         sh_degree=args.sh_degree,
         max_num_iterations=args.max_num_iterations,
         cull_alpha_thresh=args.cull_alpha_thresh,
+        num_downscales=args.num_downscales,
+        split_screen_size=args.split_screen_size,
         background_color=args.background_color,
         vis=args.vis,
         splatformer_root=args.splatformer_root,
@@ -1675,7 +1716,9 @@ def run_category_batch(args: argparse.Namespace, cfg: SplatfactoShapeNetConfig) 
     print(
         f"Training config: views={cfg.num_views}, train_views={cfg.effective_num_train_views}, "
         f"LR={cfg.lr_image_size}px (scale={cfg.camera_res_scale_factor}), "
-        f"iters={cfg.max_num_iterations}, cull_alpha={cfg.cull_alpha_thresh}"
+        f"iters={cfg.max_num_iterations}, cull_alpha={cfg.cull_alpha_thresh}, "
+        f"num_downscales={cfg.num_downscales}, "
+        f"split_screen_size={cfg.effective_split_screen_size:.4f}"
     )
     if reuse_roots:
         print(f"Reuse render roots: {reuse_roots}")

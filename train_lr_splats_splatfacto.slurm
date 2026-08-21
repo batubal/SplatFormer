@@ -29,7 +29,8 @@ ENV_DIR=${SCRATCH_DIR}/conda/envs/nerfstudio
 #   sbatch --export=ALL,NUM_TRAIN_VIEWS=4,OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_sparse4_x2 \
 #     train_lr_splats_splatfacto.slurm
 #
-# Dense 4× (72 views, LR=100 / HR=400):
+# Dense 4× (72 views, LR=100 / HR=400). Uses num_downscales=0 so ns-train
+# is at 100px, not splatfacto's extra 25px coarse stage:
 #   sbatch --export=ALL,LR_IMAGE_SIZE=100,OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_x4 \
 #     train_lr_splats_splatfacto.slurm
 #
@@ -58,6 +59,10 @@ NUM_VIEWS=${NUM_VIEWS:-72}            # hemisphere cameras rendered / available
 NUM_TRAIN_VIEWS=${NUM_TRAIN_VIEWS:-0} # 0 = all views (dense); 4 = sparse-view
 HR_IMAGE_SIZE=${HR_IMAGE_SIZE:-400}
 LR_IMAGE_SIZE=${LR_IMAGE_SIZE:-200}   # 200 → 2×, 100 → 4× (scale = LR/HR)
+# splatfacto extra coarse-to-fine (default 2 would train 100px 4× at 25px for 3k steps).
+NUM_DOWNSCALES=${NUM_DOWNSCALES:-0}
+# Empty → auto-scale 0.05 to 200px (4× → 0.10). Set explicitly to override.
+SPLIT_SCREEN_SIZE=${SPLIT_SCREEN_SIZE:-}
 
 OVERWRITE=${OVERWRITE:-0}
 SKIP_EVAL=${SKIP_EVAL:-1}
@@ -127,6 +132,7 @@ echo "Date: $(date)"
 echo "REPO_DIR: ${REPO_DIR}"
 echo "CATEGORY_ID: ${CATEGORY_ID:-ALL}  SPLIT: ${SPLIT}  OFFSET: ${OFFSET}  NUM_SAMPLES: ${NUM_SAMPLES}"
 echo "NUM_VIEWS: ${NUM_VIEWS}  NUM_TRAIN_VIEWS: ${NUM_TRAIN_VIEWS} (0=all)  HR: ${HR_IMAGE_SIZE}  LR: ${LR_IMAGE_SIZE}"
+echo "NUM_DOWNSCALES: ${NUM_DOWNSCALES}  SPLIT_SCREEN_SIZE: ${SPLIT_SCREEN_SIZE:-auto}"
 echo "ROOT_PATH: ${ROOT_PATH}"
 echo "OUTPUT_ROOT: ${OUTPUT_ROOT}"
 echo "REUSE_RENDER_ROOT: ${REUSE_RENDER_ROOT}"
@@ -187,6 +193,9 @@ if [[ "${RERUN_WRONG_ITERATIONS}" == "1" ]]; then
   EXTRA_ARGS+=(--rerun_wrong_iterations)
   EXTRA_ARGS+=(--wrong_iterations "${WRONG_ITERATIONS}")
 fi
+if [[ -n "${SPLIT_SCREEN_SIZE}" ]]; then
+  EXTRA_ARGS+=(--split_screen_size "${SPLIT_SCREEN_SIZE}")
+fi
 
 FAILED=0
 for CAT in "${CATEGORIES[@]}"; do
@@ -210,6 +219,7 @@ for CAT in "${CATEGORIES[@]}"; do
     --num_train_views "${NUM_TRAIN_VIEWS}" \
     --hr_image_size "${HR_IMAGE_SIZE}" \
     --lr_image_size "${LR_IMAGE_SIZE}" \
+    --num_downscales "${NUM_DOWNSCALES}" \
     --root_path "${ROOT_PATH}" \
     --output_root "${OUTPUT_ROOT}" \
     --dataset_cache "${DATASET_CACHE}" \
