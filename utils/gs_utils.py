@@ -8,7 +8,6 @@ from collections import OrderedDict
 from plyfile import PlyData, PlyElement
 import json
 from argparse import Namespace
-import torch_scatter
 BLOCK_WIDTH = 16 
 
 C0 = 0.28209479177387814
