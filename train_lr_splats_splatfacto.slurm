@@ -41,9 +41,18 @@ ENV_DIR=${SCRATCH_DIR}/conda/envs/nerfstudio
 # Single category / overwrite examples:
 #   sbatch --export=ALL,CATEGORY_ID=02691156,NUM_SAMPLES=10 train_lr_splats_splatfacto.slurm
 #   sbatch --export=ALL,NUM_SAMPLES=30,OVERWRITE=1 train_lr_splats_splatfacto.slurm
-CATEGORY_ID=${CATEGORY_ID:-}          # empty → all categories in dataset_cache
+#
+# Held-out ShapeNetCore categories (not in training cache). SPLIT=all is required
+# because these ids are absent from dataset_cache. Dense 2× is already the default.
+#   sbatch --export=ALL,SPLIT=all,NUM_SAMPLES=10,\
+#     CATEGORY_FILE=/arf/home/batubal/repos/gaussian_sr/logs/shapesplats_missing_category_ids.txt,\
+#     OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_ood_x2 \
+#     train_lr_splats_splatfacto.slurm
+CATEGORY_ID=${CATEGORY_ID:-}          # empty → CATEGORY_FILE / CATEGORY_IDS / cache
+CATEGORY_FILE=${CATEGORY_FILE:-}      # one 8-digit id per line (comments ok)
+CATEGORY_IDS=${CATEGORY_IDS:-}        # space-separated ids, e.g. "04330267 04468005"
 OFFSET=${OFFSET:-0}
-NUM_SAMPLES=${NUM_SAMPLES:-10}        # at most this many test-split samples / category
+NUM_SAMPLES=${NUM_SAMPLES:-10}        # at most this many samples / category
 SPLIT=${SPLIT:-test}
 ROOT_PATH=${ROOT_PATH:-${SCRATCH_DIR}/data}
 OUTPUT_ROOT=${OUTPUT_ROOT:-${SCRATCH_DIR}/lr_data_splatformer}
@@ -130,7 +139,8 @@ start_cpu_keepalive
 echo "Node: $(hostname)"
 echo "Date: $(date)"
 echo "REPO_DIR: ${REPO_DIR}"
-echo "CATEGORY_ID: ${CATEGORY_ID:-ALL}  SPLIT: ${SPLIT}  OFFSET: ${OFFSET}  NUM_SAMPLES: ${NUM_SAMPLES}"
+echo "CATEGORY_ID: ${CATEGORY_ID:-}  CATEGORY_FILE: ${CATEGORY_FILE:-}  CATEGORY_IDS: ${CATEGORY_IDS:-}"
+echo "SPLIT: ${SPLIT}  OFFSET: ${OFFSET}  NUM_SAMPLES: ${NUM_SAMPLES}"
 echo "NUM_VIEWS: ${NUM_VIEWS}  NUM_TRAIN_VIEWS: ${NUM_TRAIN_VIEWS} (0=all)  HR: ${HR_IMAGE_SIZE}  LR: ${LR_IMAGE_SIZE}"
 echo "NUM_DOWNSCALES: ${NUM_DOWNSCALES}  SPLIT_SCREEN_SIZE: ${SPLIT_SCREEN_SIZE:-auto}"
 echo "ROOT_PATH: ${ROOT_PATH}"
@@ -160,9 +170,29 @@ test -d "${ROOT_PATH}" || {
   exit 1
 }
 
-# Resolve category list: single CATEGORY_ID, or every category present in the test split.
+# Resolve category list: CATEGORY_ID, CATEGORY_FILE, CATEGORY_IDS, or cache test split.
+_read_category_file() {
+  local path="$1"
+  python - <<PY
+from pathlib import Path
+p = Path("${path}")
+if not p.is_file():
+    raise SystemExit(f"CATEGORY_FILE not found: {p}")
+ids = []
+for raw in p.read_text().splitlines():
+    line = raw.split("#", 1)[0].strip()
+    if line:
+        ids.append(line.split()[0].replace(".zip", "").split("_")[0])
+print("\\n".join(ids))
+PY
+}
+
 if [[ -n "${CATEGORY_ID}" ]]; then
   CATEGORIES=("${CATEGORY_ID}")
+elif [[ -n "${CATEGORY_FILE}" ]]; then
+  mapfile -t CATEGORIES < <(_read_category_file "${CATEGORY_FILE}")
+elif [[ -n "${CATEGORY_IDS}" ]]; then
+  read -ra CATEGORIES <<< "${CATEGORY_IDS}"
 else
   mapfile -t CATEGORIES < <(python - <<PY
 from lr_splat_helpers import compute_dataset_split_indices

@@ -1687,6 +1687,13 @@ def run_category_batch(args: argparse.Namespace, cfg: SplatfactoShapeNetConfig) 
             f"Category {category_id} [{args.split}]: {len(ply_files)} samples "
             f"from {args.dataset_cache} (seed={cfg.seed})"
         )
+        if not ply_files:
+            print(
+                f"WARNING: no {args.split}-split samples for {category_id} in the "
+                "dataset cache (held-out category?). Falling back to every HR PLY "
+                f"under {os.path.join(data_root, category_id)} (--split all)."
+            )
+            ply_files = list_category_ply_files(data_root, category_id)
     else:
         ply_files = list_category_ply_files(data_root, category_id)
 
