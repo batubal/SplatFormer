@@ -702,6 +702,12 @@ class SplatfactoShapeNetConfig:
     # None → splatfacto default 15000 when dense; 5000 when sparse (stop densifying
     # before Gaussians fill the 4 camera frustums).
     stop_split_at: int | None = None
+    # None → splatfacto default (50000) when dense; 5000 when sparse to avoid
+    # filling frustums with unused random points that outnumber the object.
+    num_random: int | None = None
+    # None → splatfacto default (10.0) when dense; 1.0 when sparse to confine
+    # initial Gaussians near the origin where the object actually lives.
+    random_scale: float | None = None
 
     # SplatFormer export
     splatformer_root: str = "test-set/customOOD"
@@ -752,6 +758,29 @@ class SplatfactoShapeNetConfig:
         if self.train_all_views:
             return None
         return 5_000
+
+    @property
+    def effective_num_random(self) -> int:
+        if self.num_random is not None:
+            return int(self.num_random)
+        if self.train_all_views:
+            return 50_000
+        return 5_000
+
+    @property
+    def effective_random_scale(self) -> float:
+        if self.random_scale is not None:
+            return float(self.random_scale)
+        if self.train_all_views:
+            return 10.0
+        return 1.0
+
+    @property
+    def effective_background_color(self) -> str:
+        """Random BG for sparse views prevents the model from hiding white splats."""
+        if self.train_all_views:
+            return self.background_color
+        return "random"
 
 
 # ---------------------------------------------------------------------------
@@ -1408,6 +1437,9 @@ def process_sample(
             f"(train_views={cfg.effective_num_train_views}/{cfg.num_views}, "
             f"iters={cfg.effective_max_num_iterations}, "
             f"stop_split_at={cfg.effective_stop_split_at}, "
+            f"num_random={cfg.effective_num_random}, "
+            f"random_scale={cfg.effective_random_scale}, "
+            f"bg_color={cfg.effective_background_color}, "
             f"scale={cfg.camera_res_scale_factor}, "
             f"num_downscales={cfg.num_downscales}, "
             f"split_screen_size={cfg.effective_split_screen_size:.4f}) ==="
@@ -1435,11 +1467,15 @@ def process_sample(
             "--pipeline.model.cull-alpha-thresh",
             str(cfg.cull_alpha_thresh),
             "--pipeline.model.background-color",
-            cfg.background_color,
+            cfg.effective_background_color,
             "--pipeline.model.num-downscales",
             str(cfg.num_downscales),
             "--pipeline.model.split-screen-size",
             str(cfg.effective_split_screen_size),
+            "--pipeline.model.num-random",
+            str(cfg.effective_num_random),
+            "--pipeline.model.random-scale",
+            str(cfg.effective_random_scale),
         ]
         if cfg.effective_stop_split_at is not None:
             train_cmd += [
@@ -1628,6 +1664,24 @@ def parse_args() -> argparse.Namespace:
             "all views; 5000 when --num_train_views is sparse."
         ),
     )
+    parser.add_argument(
+        "--num_random",
+        type=int,
+        default=None,
+        help=(
+            "Number of random initial Gaussians. Default: 50000 (dense); "
+            "5000 (sparse) to avoid filling frustums."
+        ),
+    )
+    parser.add_argument(
+        "--random_scale",
+        type=float,
+        default=None,
+        help=(
+            "Spatial extent of random init box (half-side). Default: 10.0 (dense); "
+            "1.0 (sparse) to confine points near the object."
+        ),
+    )
     parser.add_argument("--cull_alpha_thresh", type=float, default=0.15)
     parser.add_argument(
         "--num_downscales",
@@ -1744,6 +1798,8 @@ def _build_splatfacto_config(args: argparse.Namespace) -> SplatfactoShapeNetConf
         sh_degree=args.sh_degree,
         max_num_iterations=args.max_num_iterations,
         stop_split_at=args.stop_split_at,
+        num_random=args.num_random,
+        random_scale=args.random_scale,
         cull_alpha_thresh=args.cull_alpha_thresh,
         num_downscales=args.num_downscales,
         split_screen_size=args.split_screen_size,
@@ -1832,6 +1888,9 @@ def run_category_batch(args: argparse.Namespace, cfg: SplatfactoShapeNetConfig) 
         f"LR={cfg.lr_image_size}px (scale={cfg.camera_res_scale_factor}), "
         f"iters={cfg.effective_max_num_iterations}, "
         f"stop_split_at={cfg.effective_stop_split_at}, "
+        f"num_random={cfg.effective_num_random}, "
+        f"random_scale={cfg.effective_random_scale}, "
+        f"bg_color={cfg.effective_background_color}, "
         f"cull_alpha={cfg.cull_alpha_thresh}, "
         f"num_downscales={cfg.num_downscales}, "
         f"split_screen_size={cfg.effective_split_screen_size:.4f}"
