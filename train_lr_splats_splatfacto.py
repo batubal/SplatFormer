@@ -74,6 +74,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from lr_splat_helpers import (
+    _hemisphere_unit_directions,
     find_existing_nerf_dataset,
     list_category_ply_files,
     list_category_split_ply_files,
@@ -757,6 +758,50 @@ def _evenly_spaced_indices(num_views: int, k: int) -> list[int]:
     return [int(round(i * (num_views - 1) / (k - 1))) for i in range(k)]
 
 
+# Match the stage2_orbit *test* cameras (8 views evenly around azimuth at ~45 deg
+# elevation). The 72 hemisphere views follow a Fibonacci golden spiral where the
+# index controls *both* elevation and azimuth (see _hemisphere_unit_directions),
+# so evenly-spaced indices bunch all sparse-view cameras into a ~77 deg azimuth
+# wedge and leave ~280 deg of the object unobserved -> exploded LR splats.
+_SPARSE_TRAIN_TARGET_ELEV_DEG = 45.0
+
+
+def _spread_view_indices(
+    num_views: int, k: int, target_elev_deg: float = _SPARSE_TRAIN_TARGET_ELEV_DEG
+) -> list[int]:
+    """Pick ``k`` views spread evenly in azimuth at ~``target_elev_deg`` elevation.
+
+    Chooses ``k`` azimuth targets around the full circle at a fixed elevation and
+    greedily assigns the nearest unused Fibonacci-spiral view direction. This mirrors
+    the stage2_orbit eval-camera ring so sparse-view training supervises the same
+    hemisphere the model is evaluated on (unlike evenly-spaced spiral indices, which
+    cluster on one side).
+    """
+    if num_views <= 0 or k <= 0:
+        return []
+    if k >= num_views:
+        return list(range(num_views))
+    directions = _hemisphere_unit_directions(num_views)
+    tel = math.radians(target_elev_deg)
+    tz = math.sin(tel)
+    tr = math.cos(tel)
+    selected: list[int] = []
+    for a in range(k):
+        az = 2.0 * math.pi * a / k
+        tx, ty = tr * math.cos(az), tr * math.sin(az)
+        best_dist = float("inf")
+        best_idx = None
+        for i, (dx, dy, dz) in enumerate(directions):
+            if i in selected:
+                continue
+            dist = (dx - tx) ** 2 + (dy - ty) ** 2 + (dz - tz) ** 2
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        selected.append(int(best_idx))
+    return sorted(selected)
+
+
 def _eval_view_indices(num_views: int, max_eval_views: int = 8) -> list[int]:
     """Pick held-out views for nerfstudio val/test (matches gaussian_sr step sampling)."""
     if num_views <= 0:
@@ -773,10 +818,11 @@ def _disjoint_train_eval_indices(
     """
     Return (train_indices, eval_indices) with no overlap.
 
-    Train gets at most ``max_train_views`` evenly spaced views (default 4).
-    Eval is sampled from the remainder.
+    Train gets at most ``max_train_views`` views spread evenly in azimuth at
+    ~45 deg elevation (matching the eval-camera ring); eval is sampled from the
+    remainder.
     """
-    train_ids = _evenly_spaced_indices(num_views, max_train_views)
+    train_ids = _spread_view_indices(num_views, max_train_views)
     train_set = set(train_ids)
     remaining = [i for i in range(num_views) if i not in train_set]
     if not remaining:
