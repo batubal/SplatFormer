@@ -25,8 +25,9 @@ ENV_DIR=${SCRATCH_DIR}/conda/envs/nerfstudio
 # Default = dense 2× (72 train views, LR=200 / HR=400):
 #   sbatch train_lr_splats_splatfacto.slurm
 #
-# Sparse-view 2× (4 of 72 views, LR=200):
-#   sbatch --export=ALL,NUM_TRAIN_VIEWS=4,OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_sparse4_x2 \
+# Sparse-view 2× (4 of 72 views: 1 top + 3 sides @ 30 deg, 10k iters, stop-split 5k):
+#   sbatch --export=ALL,NUM_TRAIN_VIEWS=4,OVERWRITE=1,\
+#     OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_sparse4_x2 \
 #     train_lr_splats_splatfacto.slurm
 #
 # Dense 4× (72 views, LR=100 / HR=400). Uses num_downscales=0 so ns-train
@@ -35,7 +36,8 @@ ENV_DIR=${SCRATCH_DIR}/conda/envs/nerfstudio
 #     train_lr_splats_splatfacto.slurm
 #
 # Sparse-view 4× (4 views + LR=100):
-#   sbatch --export=ALL,NUM_TRAIN_VIEWS=4,LR_IMAGE_SIZE=100,OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_sparse4_x4 \
+#   sbatch --export=ALL,NUM_TRAIN_VIEWS=4,LR_IMAGE_SIZE=100,OVERWRITE=1,\
+#     OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_sparse4_x4 \
 #     train_lr_splats_splatfacto.slurm
 #
 # Single category / overwrite examples:

@@ -699,6 +699,9 @@ class SplatfactoShapeNetConfig:
     num_downscales: int = 0
     # None → scale splatfacto's 0.05 so a Gaussian covers the same *pixels* as at 200px.
     split_screen_size: float | None = None
+    # None → splatfacto default 15000 when dense; 5000 when sparse (stop densifying
+    # before Gaussians fill the 4 camera frustums).
+    stop_split_at: int | None = None
 
     # SplatFormer export
     splatformer_root: str = "test-set/customOOD"
@@ -733,6 +736,23 @@ class SplatfactoShapeNetConfig:
     def effective_num_train_views(self) -> int:
         return int(self.num_views) if self.train_all_views else int(self.num_train_views)
 
+    @property
+    def effective_max_num_iterations(self) -> int:
+        """Sparse 4-view fits explode if densification runs for the full 20k dense schedule."""
+        if self.train_all_views:
+            return int(self.max_num_iterations)
+        if int(self.max_num_iterations) == 20_000:
+            return 10_000
+        return int(self.max_num_iterations)
+
+    @property
+    def effective_stop_split_at(self) -> int | None:
+        if self.stop_split_at is not None:
+            return int(self.stop_split_at)
+        if self.train_all_views:
+            return None
+        return 5_000
+
 
 # ---------------------------------------------------------------------------
 # NeRF Synthetic dataset export
@@ -758,47 +778,65 @@ def _evenly_spaced_indices(num_views: int, k: int) -> list[int]:
     return [int(round(i * (num_views - 1) / (k - 1))) for i in range(k)]
 
 
-# Match the stage2_orbit *test* cameras (8 views evenly around azimuth at ~45 deg
-# elevation). The 72 hemisphere views follow a Fibonacci golden spiral where the
-# index controls *both* elevation and azimuth (see _hemisphere_unit_directions),
-# so evenly-spaced indices bunch all sparse-view cameras into a ~77 deg azimuth
-# wedge and leave ~280 deg of the object unobserved -> exploded LR splats.
-_SPARSE_TRAIN_TARGET_ELEV_DEG = 45.0
+# Sparse-view layout: 1 near-zenith camera + (k-1) sides at ~30 deg elevation,
+# spaced evenly in azimuth. Four co-elevation 45 deg cameras leave depth along
+# each ray unconstrained, so splatfacto fills the 4 frustums instead of the object.
+# Evenly-spaced Fibonacci *indices* are worse still: they bunch into a ~77 deg
+# azimuth wedge (see _hemisphere_unit_directions).
+_SPARSE_VIEW_LAYOUT = "top_plus_sides"
+_SPARSE_TOP_ELEV_DEG = 80.0
+_SPARSE_SIDE_ELEV_DEG = 30.0
 
 
-def _spread_view_indices(
-    num_views: int, k: int, target_elev_deg: float = _SPARSE_TRAIN_TARGET_ELEV_DEG
-) -> list[int]:
-    """Pick ``k`` views spread evenly in azimuth at ~``target_elev_deg`` elevation.
+def _elev_az_unit(elev_deg: float, az_rad: float) -> tuple[float, float, float]:
+    el = math.radians(elev_deg)
+    z = math.sin(el)
+    r = math.cos(el)
+    return (r * math.cos(az_rad), r * math.sin(az_rad), z)
 
-    Chooses ``k`` azimuth targets around the full circle at a fixed elevation and
-    greedily assigns the nearest unused Fibonacci-spiral view direction. This mirrors
-    the stage2_orbit eval-camera ring so sparse-view training supervises the same
-    hemisphere the model is evaluated on (unlike evenly-spaced spiral indices, which
-    cluster on one side).
+
+def _nearest_unused_direction(
+    directions: list[tuple[float, float, float]],
+    target: tuple[float, float, float],
+    selected: list[int],
+) -> int:
+    tx, ty, tz = target
+    selected_set = set(selected)
+    best_dist = float("inf")
+    best_idx = 0
+    for i, (dx, dy, dz) in enumerate(directions):
+        if i in selected_set:
+            continue
+        dist = (dx - tx) ** 2 + (dy - ty) ** 2 + (dz - tz) ** 2
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = i
+    return int(best_idx)
+
+
+def _spread_view_indices(num_views: int, k: int) -> list[int]:
+    """Pick ``k`` views: 1 near the top, the rest around the object at ~30 deg.
+
+    Greedily assigns the nearest unused Fibonacci-spiral direction to each target.
+    For k=4 this is 1 top + 3 sides at 120 deg azimuth (not 4 cameras on a 45 deg ring).
     """
     if num_views <= 0 or k <= 0:
         return []
     if k >= num_views:
         return list(range(num_views))
     directions = _hemisphere_unit_directions(num_views)
-    tel = math.radians(target_elev_deg)
-    tz = math.sin(tel)
-    tr = math.cos(tel)
     selected: list[int] = []
-    for a in range(k):
-        az = 2.0 * math.pi * a / k
-        tx, ty = tr * math.cos(az), tr * math.sin(az)
-        best_dist = float("inf")
-        best_idx = None
-        for i, (dx, dy, dz) in enumerate(directions):
-            if i in selected:
-                continue
-            dist = (dx - tx) ** 2 + (dy - ty) ** 2 + (dz - tz) ** 2
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
-        selected.append(int(best_idx))
+    selected.append(
+        _nearest_unused_direction(directions, _elev_az_unit(_SPARSE_TOP_ELEV_DEG, 0.0), selected)
+    )
+    n_side = k - 1
+    for a in range(n_side):
+        az = 2.0 * math.pi * a / n_side
+        selected.append(
+            _nearest_unused_direction(
+                directions, _elev_az_unit(_SPARSE_SIDE_ELEV_DEG, az), selected
+            )
+        )
     return sorted(selected)
 
 
@@ -818,9 +856,8 @@ def _disjoint_train_eval_indices(
     """
     Return (train_indices, eval_indices) with no overlap.
 
-    Train gets at most ``max_train_views`` views spread evenly in azimuth at
-    ~45 deg elevation (matching the eval-camera ring); eval is sampled from the
-    remainder.
+    Train gets at most ``max_train_views`` views (1 near-zenith + the rest at
+    ~30 deg elevation, even azimuth); eval is sampled from the remainder.
     """
     train_ids = _spread_view_indices(num_views, max_train_views)
     train_set = set(train_ids)
@@ -890,6 +927,7 @@ def _write_disjoint_nerf_splits(
                 set(existing.get("eval_indices", []))
             )
             and len(existing.get("train_indices", [])) == max_train_views
+            and existing.get("view_layout") == _SPARSE_VIEW_LAYOUT
         ):
             return existing
 
@@ -904,6 +942,7 @@ def _write_disjoint_nerf_splits(
         "disjoint": True,
         "max_train_views": max_train_views,
         "max_eval_views": max_eval_views,
+        "view_layout": _SPARSE_VIEW_LAYOUT,
     }
     with open(split_path, "w", encoding="utf-8") as f:
         json.dump(split, f, indent=2)
@@ -993,6 +1032,7 @@ def _ensure_nerf_eval_transforms(
             split.get("disjoint")
             and set(split.get("train_indices", [])).isdisjoint(set(split.get("eval_indices", [])))
             and len(split.get("train_indices", [])) == max_train_views
+            and split.get("view_layout") == _SPARSE_VIEW_LAYOUT
             and os.path.isfile(os.path.join(dataset_dir, "transforms_val.json"))
             and os.path.isfile(os.path.join(dataset_dir, "transforms_test.json"))
         ):
@@ -1098,6 +1138,7 @@ def export_nerf_synthetic_dataset(
         "num_train_views": cfg.effective_num_train_views,
         "disjoint_splits": bool(split.get("disjoint", False)),
         "train_all_views": cfg.train_all_views,
+        "view_layout": split.get("view_layout"),
     }
     with open(os.path.join(dataset_dir, "dataset_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
@@ -1169,7 +1210,7 @@ def _format_metrics_record(
             gaussian_nums = ""
     file_size_mb = os.path.getsize(ply_path) / (1024 * 1024) if os.path.isfile(ply_path) else 0.0
     return {
-        "iteration": str(cfg.max_num_iterations),
+        "iteration": str(cfg.effective_max_num_iterations),
         "l1_loss": "",
         "psnr": str(eval_metrics.get("psnr", "")),
         "ssim": str(eval_metrics.get("ssim", "")),
@@ -1365,6 +1406,8 @@ def process_sample(
         print(
             f"=== ns-train splatfacto "
             f"(train_views={cfg.effective_num_train_views}/{cfg.num_views}, "
+            f"iters={cfg.effective_max_num_iterations}, "
+            f"stop_split_at={cfg.effective_stop_split_at}, "
             f"scale={cfg.camera_res_scale_factor}, "
             f"num_downscales={cfg.num_downscales}, "
             f"split_screen_size={cfg.effective_split_screen_size:.4f}) ==="
@@ -1378,7 +1421,7 @@ def process_sample(
             "--vis",
             _resolve_ns_vis(cfg.vis),
             "--max-num-iterations",
-            str(cfg.max_num_iterations),
+            str(cfg.effective_max_num_iterations),
             # Skip in-training eval; it freezes the progress table (~15%) and
             # makes ETA jump to many hours. Final quality is from ns-eval / SplatFormer.
             "--steps-per-eval-image",
@@ -1397,6 +1440,13 @@ def process_sample(
             str(cfg.num_downscales),
             "--pipeline.model.split-screen-size",
             str(cfg.effective_split_screen_size),
+        ]
+        if cfg.effective_stop_split_at is not None:
+            train_cmd += [
+                "--pipeline.model.stop-split-at",
+                str(cfg.effective_stop_split_at),
+            ]
+        train_cmd += [
             "--pipeline.datamanager.camera-res-scale-factor",
             str(cfg.camera_res_scale_factor),
             "blender-data",
@@ -1557,7 +1607,8 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "Views used for splatfacto training. 0 (default) = all --num_views "
-            "(gaussian_sr). Set e.g. 4 for sparse-view disjoint training."
+            "(gaussian_sr). Set e.g. 4 for sparse-view disjoint training "
+            "(1 near-top + 3 sides at 30 deg / 120 deg azimuth)."
         ),
     )
     parser.add_argument("--hr_image_size", type=int, default=400)
@@ -1568,6 +1619,15 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--sh_degree", type=int, default=0)
     parser.add_argument("--max_num_iterations", type=int, default=20_000)
+    parser.add_argument(
+        "--stop_split_at",
+        type=int,
+        default=None,
+        help=(
+            "splatfacto step to stop densify/split. Default: omit (15000) when training "
+            "all views; 5000 when --num_train_views is sparse."
+        ),
+    )
     parser.add_argument("--cull_alpha_thresh", type=float, default=0.15)
     parser.add_argument(
         "--num_downscales",
@@ -1683,6 +1743,7 @@ def _build_splatfacto_config(args: argparse.Namespace) -> SplatfactoShapeNetConf
         seed=args.seed,
         sh_degree=args.sh_degree,
         max_num_iterations=args.max_num_iterations,
+        stop_split_at=args.stop_split_at,
         cull_alpha_thresh=args.cull_alpha_thresh,
         num_downscales=args.num_downscales,
         split_screen_size=args.split_screen_size,
@@ -1769,7 +1830,9 @@ def run_category_batch(args: argparse.Namespace, cfg: SplatfactoShapeNetConfig) 
     print(
         f"Training config: views={cfg.num_views}, train_views={cfg.effective_num_train_views}, "
         f"LR={cfg.lr_image_size}px (scale={cfg.camera_res_scale_factor}), "
-        f"iters={cfg.max_num_iterations}, cull_alpha={cfg.cull_alpha_thresh}, "
+        f"iters={cfg.effective_max_num_iterations}, "
+        f"stop_split_at={cfg.effective_stop_split_at}, "
+        f"cull_alpha={cfg.cull_alpha_thresh}, "
         f"num_downscales={cfg.num_downscales}, "
         f"split_screen_size={cfg.effective_split_screen_size:.4f}"
     )
