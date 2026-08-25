@@ -781,10 +781,10 @@ class SplatfactoShapeNetConfig:
 
     @property
     def effective_background_color(self) -> str:
-        """Random BG for sparse views prevents the model from hiding white splats."""
-        if self.train_all_views:
-            return self.background_color
-        return "random"
+        # Must match the baked dataset background. ``random`` on white Blender
+        # images forces splatfacto to cover every pixel with opaque white
+        # Gaussians so the compositor color never leaks — a white splat cloud.
+        return self.background_color
 
 
 # ---------------------------------------------------------------------------
@@ -1481,6 +1481,15 @@ def process_sample(
             "--pipeline.model.random-scale",
             str(cfg.effective_random_scale),
         ]
+        if not cfg.train_all_views:
+            # Honour num_random / random_scale (blender-data has no SfM cloud)
+            # and penalize huge anisotropic Gaussians after densify stops.
+            train_cmd += [
+                "--pipeline.model.random-init",
+                "True",
+                "--pipeline.model.use-scale-regularization",
+                "True",
+            ]
         if cfg.effective_stop_split_at is not None:
             train_cmd += [
                 "--pipeline.model.stop-split-at",

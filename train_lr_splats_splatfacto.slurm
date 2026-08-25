@@ -26,7 +26,7 @@ ENV_DIR=${SCRATCH_DIR}/conda/envs/nerfstudio
 #   sbatch train_lr_splats_splatfacto.slurm
 #
 # Sparse-view 2× (4 of 72 views: 1 top + 3 sides @ 30 deg, 10k iters,
-#   stop-split 1.5k, num_random 5k, random_scale 1.0, bg random):
+#   stop-split 1.5k, num_random 5k, random_scale 1.0, white bg, random-init):
 #   sbatch --export=ALL,NUM_TRAIN_VIEWS=4,OVERWRITE=1,\
 #     OUTPUT_ROOT=/arf/scratch/batubal/lr_data_splatformer_sparse4_x2 \
 #     train_lr_splats_splatfacto.slurm
