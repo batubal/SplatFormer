@@ -757,7 +757,11 @@ class SplatfactoShapeNetConfig:
             return int(self.stop_split_at)
         if self.train_all_views:
             return None
-        return 5_000
+        # With random_scale=1.0 all initial points sit inside the frustum and
+        # accumulate gradients → runaway densification if we allow 50 rounds.
+        # 1500 steps / refine_every=100 = 15 rounds is enough to grow from 5k
+        # to ~20-30k without exploding to millions.
+        return 1_500
 
     @property
     def effective_num_random(self) -> int:
